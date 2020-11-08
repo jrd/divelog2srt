@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+from argparse import ArgumentParser
+from datetime import datetime, timedelta
+from os import utime
+from pathlib import Path
+from subprocess import run
+from xml.dom import minidom
+
+
+class Sample:
+    def __init__(self, datetime, depth):
+        self.datetime = datetime
+        self.depth = depth
+
+    def depth_unit(self, feet_format=False):
+        return f'-{self.depth * 3.28084:2.1f} f' if feet_format else f'-{self.depth:2.1f} m'
+
+    def __str__(self):
+        return f"{self.datetime} {self.depth_unit()}"
+
+
+class Dive:
+    def __init__(self, samples, date_str, time_str, duration, timediff: timedelta):
+        self.start_time = datetime.fromisoformat(f'{date_str}T{time_str}') + timediff
+        duration = duration.split(' ')[0].split(':')
+        duration_secs = int(duration[0]) * 60 + int(duration[1])
+        self.end_time = self.start_time + timedelta(seconds=duration_secs)
+        self.samples = [self.parse_sample(sample) for sample in samples]
+
+    def parse_sample(self, sample_dict):
+        time_str = sample_dict['time'].split(' ')[0].split(':')
+        time_secs = int(time_str[0]) * 60 + int(time_str[1])
+        depth = float(sample_dict['depth'].split(' ')[0])
+        return Sample(
+            self.start_time + timedelta(seconds=time_secs),
+            depth,
+        )
+
+    def __str__(self):
+        s = f"Dive {self.start_time}/{self.end_time}\n"
+        for sample in self.samples:
+            s += f"  {sample}\n"
+        return s
+
+
+class Logbook:
+    def __init__(self, dives):
+        self.dives = dives
+
+    def __str__(self):
+        return "Logbook\n" + "\n".join(f"  {dive}" for dive in self.dives)
+
+
+class Media:
+    def __init__(self, path: Path, start_time: datetime, duration: float, width: int, height: int):
+        self.path = path
+        self.start_time = start_time
+        self.duration = round(duration)
+        self.end_time = self.start_time + timedelta(seconds=self.duration)
+        self.width = width
+        self.height = height
+
+    def __str__(self):
+        return f"{self.path} {self.start_time} – {self.end_time} ({self.width}x{self.height})"
+
+
+def parse_logbook(logbook_path, timediff=timedelta(), only=None):
+    doc = minidom.parse(logbook_path)
+    dives = []
+    for dive_tag in doc.getElementsByTagName('dive'):
+        if only is not None and int(dive_tag.attributes.get('number').value) != only:
+            continue
+        samples = [dict(sample_tag.attributes.items()) for sample_tag in dive_tag.getElementsByTagName('sample')]
+        dives.append(Dive(
+            samples,
+            dive_tag.attributes.get('date').value,
+            dive_tag.attributes.get('time').value,
+            dive_tag.attributes.get('duration').value,
+            timediff,
+        ))
+    return Logbook(dives)
+
+
+def find_media_info(media_path, i, n):
+    print(f'\r\x1B\x5BK{i:03}/{n:03} Getting info for {media_path.name}', end='')
+    if media_path.suffix.lower() == '.mp4':
+        res = run(
+            [
+                'ffprobe',
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream_tags=creation_time',
+                '-show_entries', 'format=duration',
+                '-show_entries', 'stream=width,height',
+                '-of', 'default=noprint_wrappers=1',
+                media_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        values = dict(line.split('=') for line in res.stdout.strip().split('\n'))
+        try:
+            start_time = datetime.fromisoformat(values['TAG:creation_time'][:-1])
+            secs = float(values['duration'])
+            width = int(values['width'])
+            height = int(values['height'])
+        except ValueError:
+            raise ValueError(res.stderr.strip())
+    else:
+        start_time = datetime.fromtimestamp(media_path.stat().st_mtime)
+        secs = 0
+        width = 640
+        height = 480
+    return Media(
+        media_path,
+        start_time,
+        secs,
+        width,
+        height,
+    )
+
+
+def find_medias(logbook, media_directory):
+    media_pathes = [p for p in Path(media_directory).glob('*.*') if not any((
+        p.stem.endswith('_deepmask'),
+        all((
+            p.with_suffix('.srt').exists(),
+            (p.parent / f'{p.stem}_deepmask{p.suffix}').exists(),
+        )),
+    ))]
+    n = len(media_pathes)
+    medias = list(sorted(
+        (find_media_info(media, i, n) for i, media in enumerate(media_pathes, 1)),
+        key=lambda el: el.start_time,
+    ))
+    print('\r\x1B\x5BK', end='')
+    return medias
+
+
+def delta_to_srt_format(delta: timedelta) -> str:
+    return datetime.utcfromtimestamp(delta.total_seconds()).strftime('%H:%M:%S,%f')[:-3]
+
+
+def create_subtitles_for_media(subtitle_path, samples, media, feet_format=False):
+    if not subtitle_path.exists():
+        dts = [(s2.datetime - s1.datetime).total_seconds() for s1, s2 in zip(samples[:-1], samples[1:])]
+        if len(dts):
+            freq = round(sum(dts) / len(dts))
+            semi_freq = timedelta(seconds=freq / 2)
+        else:
+            semi_freq = timedelta(seconds=2)
+        with subtitle_path.open('w') as f:
+            delta = timedelta()  # 0
+            for i, sample in enumerate(samples, 1):
+                f.write(f'{i}\n')
+                f.write(delta_to_srt_format(max(delta, (sample.datetime - media.start_time) - semi_freq)))
+                f.write(' --> ')
+                delta = (sample.datetime - media.start_time) + semi_freq
+                f.write(delta_to_srt_format(delta))
+                f.write(f'\n{sample.depth_unit(feet_format)}\n\n')
+        stat = media.path.stat()
+        utime(subtitle_path, times=(stat.st_atime, stat.st_mtime))
+
+
+def create_mask_for_media(subtitle_path, media):
+    mask_path = media.path.parent / f'{media.path.stem}_deepmask{media.path.suffix}'
+    if not mask_path.exists() and media.duration:
+        run(
+            [
+                'ffmpeg',
+                '-v', 'error',
+                '-f', 'lavfi',
+                '-i', f'color=color=black:size={media.width}x{media.height}:rate=5:duration={media.duration}',
+                '-vf', f'subtitles={subtitle_path}',
+                '-y',
+                mask_path,
+            ],
+        )
+        stat = media.path.stat()
+        utime(mask_path, times=(stat.st_atime, stat.st_mtime))
+
+
+def create_subtitles(logbook, medias, feet_format=False, create_mask=False):
+    if medias:
+        print('Creating subtitles')
+        n = len(medias)
+        for i, media in enumerate(medias, 1):
+            for dive in logbook.dives:
+                if any((
+                    dive.start_time <= media.start_time <= dive.end_time,
+                    media.start_time <= dive.start_time <= media.end_time,
+                    media.start_time <= dive.end_time <= media.end_time,
+                )):
+                    media_dive = dive
+                    break
+            else:
+                continue
+            samples = [sample for sample in media_dive.samples if media.start_time <= sample.datetime <= media.end_time]
+            if not samples:
+                continue
+            print(f'\r\x1B\x5BK{i:03}/{n:03} Creating subtitle for {media.path.name}', end='')
+            subtitle_path = media.path.with_suffix('.srt')
+            create_subtitles_for_media(subtitle_path, samples, media, feet_format=feet_format)
+            if create_mask:
+                create_mask_for_media(subtitle_path, media)
+        print('\r\x1B\x5BK', end='')
+
+
+def main():
+    parser = ArgumentParser(description="""Extract deep information from dives to .srt files for medias (videos/photos)
+mask video embeded subtitles files could also be generated""")
+    parser.add_argument('logbook')
+    parser.add_argument('media_directory')
+    parser.add_argument('-t', '--time', type=int, metavar="DIFF_IN_SECS", default=0,
+                        help="Number of seconds to add to dive log samples (could be negative)")
+    parser.add_argument('-d', '--dive', type=int, metavar="DIVE_NB", default=None,
+                        help="Only selected dive number")
+    parser.add_argument('-f', '--feet', default=False, action='store_true',
+                        help="Output in feet instead of meters")
+    parser.add_argument('-m', '--mask', default=False, action='store_true',
+                        help="Also create a subtitle mask video per subtitle")
+    opts = parser.parse_args()
+    logbook = parse_logbook(opts.logbook, timediff=timedelta(seconds=opts.time), only=opts.dive)
+    medias = find_medias(logbook, opts.media_directory)
+    create_subtitles(logbook, medias, feet_format=opts.feet, create_mask=opts.mask)
+
+
+if __name__ == '__main__':
+    main()
