@@ -1,0 +1,6 @@
+build/
+dist/
+wine/
+divelog2srt.spec
+divelog2srt.zip
+ffmpeg.zip

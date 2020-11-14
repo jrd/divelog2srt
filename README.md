@@ -10,6 +10,10 @@ Your videos should need to be recognized by ffprobe (which means quite all forma
 
 The dive log format supported right now is one from [SubSurface](https://subsurface-divelog.org). 
 
+# Windows
+
+zip bundle is available in the release github pages. You can also use the `create-windows-zip-bundle` from a Linux box.
+
 # Usage
 
 ```text

@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+cd "$(dirname "$(readlink -f "$0")")"
+export LANG=
+export WINEPREFIX="$PWD/wine"
+if [ ! -d "$WINEPREFIX" ] && [ ! -e "$WINEPREFIX/drive_c/divelog2srt" ] ; then
+    python_exe_url=https://www.python.org/ftp/python/3.9.0/python-3.9.0-amd64.exe
+    ffmpeg_zip_url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2020-11-13-12-33/ffmpeg-N-99911-g8f4aec719e-win64-gpl.zip
+    winetricks -q win10
+    winetricks -q sandbox
+    ln -s "$PWD" "$WINEPREFIX/drive_c/divelog2srt"
+    curl -Lo "python-installer.exe" "$python_exe_url"
+    curl -Lo "ffmpeg.zip" "$ffmpeg_zip_url"
+    (
+        cd "$WINEPREFIX/drive_c/divelog2srt"
+        wine python-installer.exe /quiet PrependPath=1
+        rm python-installer.exe
+        wine pip install pyinstaller
+    )
+fi
+(
+    cd "$WINEPREFIX/drive_c/divelog2srt"
+    wine pyinstaller -y divelog2srt
+)
+unzip -oj -d dist/divelog2srt/ ffmpeg.zip '*.exe'
+rm dist/divelog2srt/ffplay.exe
