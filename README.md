@@ -1,6 +1,6 @@
 # divelog2srt
 
-Create deep subtitles from you dive computer regarding media recording under water
+Create depth subtitles from you dive computer regarding media recording under water
 
 # Requirements
 
