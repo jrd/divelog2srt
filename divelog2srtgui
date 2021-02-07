@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+from datetime import timedelta
+from threading import Thread
+
+from gi import require_version
+
+from divelog2srt import (create_subtitles, find_medias, parse_logbook,
+                         set_progress_prefix, set_progress_print_function)
+
+if require_version:
+    require_version('Gtk', '3.0')
+    from gi.repository import Gtk, GLib
+else:
+    raise Exception("Cannot initialyze GTK3")
+
+
+class Divelog2SrtUI:
+    def __init__(self, builder):
+        self.logbook_path = None
+        self.mediadir_path = None
+        self.time_offset = 0
+        self.dive_number = None
+        self.feet_units = False
+        self.mask_videos = True
+        self.builder = builder
+        self.window = builder.get_object("window")
+        builder.connect_signals(self)
+        self.progress = builder.get_object("progress")
+        self.apply = builder.get_object("apply")
+        self.window.show_all()
+
+    def on_destroy(self, *args):
+        print("Quit")
+        Gtk.main_quit()
+
+    def is_apply_sensitive(self):
+        return self.logbook_path and self.mediadir_path
+
+    def on_logbook_file_set(self, button):
+        self.logbook_path = button.get_filename() or None
+        self.apply.set_sensitive(self.is_apply_sensitive())
+
+    def on_media_dir_set(self, button):
+        self.mediadir_path = button.get_filename() or None
+        self.apply.set_sensitive(self.is_apply_sensitive())
+
+    def on_time_offset_value_changed(self, button):
+        self.time_offset = int(button.get_value())
+
+    def on_dive_number_value_changed(self, button):
+        self.dive_number = int(button.get_value()) or None
+
+    def on_unit_state_set(self, button, state):
+        self.feet_units = state
+
+    def on_mask_toggled(self, button):
+        self.mask_videos = button.get_active()
+
+    def on_apply_clicked(self, button):
+        self.progress.set_label("Analyzing...")
+        self.change_buttons_state(False)
+        Thread(target=self._subtitles_thread).start()
+
+    def change_buttons_state(self, state):
+        for name in ('logbook', 'mediadir', 'time_offset', 'dive_number', 'unit', 'mask', 'apply'):
+            self.builder.get_object(name).set_sensitive(state)
+
+    def _subtitles_thread(self):
+        try:
+            set_progress_prefix('')
+            set_progress_print_function(lambda text: GLib.idle_add(self.on_progress_output, text))
+            logbook = parse_logbook(self.logbook_path,
+                                    timediff=timedelta(seconds=self.time_offset),
+                                    only=self.dive_number)
+            medias = find_medias(logbook, self.mediadir_path)
+            create_subtitles(logbook, medias,
+                             feet_format=self.feet_units,
+                             create_mask=self.mask_videos)
+            GLib.idle_add(self.on_progress_output, "Subtitles created")
+        except Exception as e:
+            GLib.idle_add(self.on_progress_output, str(e))
+        finally:
+            GLib.idle_add(self.change_buttons_state, True)
+
+    def on_progress_output(self, text):
+        self.progress.set_label(text)
+
+
+builder = Gtk.Builder()
+builder.add_from_file("divelog2srt.glade")
+divelog2srt_ui = Divelog2SrtUI(builder)
+Gtk.main()

@@ -1,10 +1,31 @@
 #!/usr/bin/env python3
 from argparse import ArgumentParser
 from datetime import datetime, timedelta
+from functools import partial
 from os import utime
 from pathlib import Path
 from subprocess import run
 from xml.dom import minidom
+
+_progress_prefix = '\r\x1B\x5BK'
+_progress_suffix = ''
+_progress_print_func = partial(print, end='')
+
+
+def set_progress_prefix(prefix):
+    globals()['_progress_prefix'] = prefix
+
+
+def set_progress_suffix(suffix):
+    globals()['_progress_suffix'] = suffix
+
+
+def set_progress_print_function(func):
+    globals()['_progress_print_func'] = func
+
+
+def _print_progress(text):
+    _progress_print_func(f'{_progress_prefix}{text}{_progress_suffix}')
 
 
 class Sample:
@@ -82,7 +103,7 @@ def parse_logbook(logbook_path, timediff=timedelta(), only=None):
 
 
 def find_media_info(media_path, i, n):
-    print(f'\r\x1B\x5BK{i:03}/{n:03} Getting info for {media_path.name}', end='')
+    _print_progress(f'{i:03}/{n:03} Getting info for {media_path.name}')
     if media_path.suffix.lower() == '.mp4':
         res = run(
             [
@@ -133,7 +154,7 @@ def find_medias(logbook, media_directory):
         (find_media_info(media, i, n) for i, media in enumerate(media_pathes, 1)),
         key=lambda el: el.start_time,
     ))
-    print('\r\x1B\x5BK', end='')
+    _print_progress('')
     return medias
 
 
@@ -182,7 +203,6 @@ def create_mask_for_media(subtitle_path, media):
 
 def create_subtitles(logbook, medias, feet_format=False, create_mask=False):
     if medias:
-        print('Creating subtitles')
         n = len(medias)
         for i, media in enumerate(medias, 1):
             for dive in logbook.dives:
@@ -198,12 +218,12 @@ def create_subtitles(logbook, medias, feet_format=False, create_mask=False):
             samples = [sample for sample in media_dive.samples if media.start_time <= sample.datetime <= media.end_time]
             if not samples:
                 continue
-            print(f'\r\x1B\x5BK{i:03}/{n:03} Creating subtitle for {media.path.name}', end='')
+            _print_progress(f'{i:03}/{n:03} Creating subtitle for {media.path.name}')
             subtitle_path = media.path.with_suffix('.srt')
             create_subtitles_for_media(subtitle_path, samples, media, feet_format=feet_format)
             if create_mask:
                 create_mask_for_media(subtitle_path, media)
-        print('\r\x1B\x5BK', end='')
+        _print_progress('')
 
 
 def main():
@@ -222,6 +242,7 @@ mask video embeded subtitles files could also be generated""")
     opts = parser.parse_args()
     logbook = parse_logbook(opts.logbook, timediff=timedelta(seconds=opts.time), only=opts.dive)
     medias = find_medias(logbook, opts.media_directory)
+    print('Creating subtitles')
     create_subtitles(logbook, medias, feet_format=opts.feet, create_mask=opts.mask)
 
 
